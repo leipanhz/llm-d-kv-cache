@@ -172,10 +172,10 @@ func (db *chunkedTokenDatabase) TokensToKVBlockKeys(
 	extraFeatures []*BlockExtraFeatures,
 ) ([]BlockHash, error) {
 	switch db.HashAlgorithm {
-	case HashAlgorithmFNV64a:
-		return db.tokensToKVBlockKeysFNV(parentKey, tokens, modelName, extraFeatures)
-	default: // HashAlgorithmSHA256CBOR and any unrecognised value
+	case HashAlgorithmSHA256CBOR:
 		return db.tokensToKVBlockKeysSHA256(parentKey, tokens, extraFeatures)
+	default: // tokensToKVBlockKeysFNV and any unrecognised value
+		return db.tokensToKVBlockKeysFNV(parentKey, tokens, modelName, extraFeatures)
 	}
 }
 
