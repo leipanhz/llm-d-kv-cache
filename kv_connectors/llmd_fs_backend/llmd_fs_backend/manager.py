@@ -23,7 +23,9 @@ from vllm.v1.kv_offload.base import (
     PrepareStoreOutput,
     ReqContext,
 )
+from zmq import ZMQError
 
+from llmd_fs_backend.event_publisher import StorageMedium
 from llmd_fs_backend.file_mapper import FileMapper
 from llmd_fs_backend.mediums import SharedStorageLoadStoreSpec
 
@@ -35,8 +37,60 @@ class SharedStorageOffloadingManager(OffloadingManager):
     SharedStorageOffloadingManager manages KV offloading to a shared storage medium.
     """
 
-    def __init__(self, file_mapper: FileMapper) -> None:
+    def __init__(
+        self,
+        file_mapper: FileMapper,
+        extra_config: dict | None = None,
+        event_publisher=None,
+    ) -> None:
         self.file_mapper: FileMapper = file_mapper
+        self._event_publisher = (
+            event_publisher
+            if event_publisher is not None
+            else self._create_event_publisher(
+                self.file_mapper.model_name, extra_config or {}
+            )
+        )
+
+    @staticmethod
+    def _create_event_publisher(model_name: str, extra_config: dict):
+        """Create a StorageEventPublisher if events are enabled in *extra_config*."""
+        if not extra_config.get("enable_events", False):
+            return None
+
+        endpoint = extra_config.get("storage_events_endpoint")
+        if not endpoint:
+            return None
+
+        kwargs = {}
+        if "storage_medium" in extra_config:
+            kwargs["medium"] = StorageMedium(extra_config["storage_medium"])
+        if "storage_events_hwm" in extra_config:
+            kwargs["sndhwm"] = int(extra_config["storage_events_hwm"])
+
+        try:
+            from llmd_fs_backend.event_publisher import StorageEventPublisher
+
+            return StorageEventPublisher(
+                endpoint=endpoint,
+                model_name=model_name,
+                **kwargs,
+            )
+        except ZMQError:
+            logger.warning(
+                "failed to create storage event publisher for %s",
+                endpoint,
+                exc_info=True,
+            )
+            return None
+
+    def _publish_blocks_stored(self, block_hashes: Collection[OffloadKey]) -> None:
+        if self._event_publisher is None:
+            return
+        try:
+            self._event_publisher.publish_blocks_stored(block_hashes)
+        except Exception:
+            logger.warning("failed to publish storage event", exc_info=True)
 
     # ----------------------------------------------------------------------
     # Lookup
@@ -100,6 +154,11 @@ class SharedStorageOffloadingManager(OffloadingManager):
         success: bool = True,
     ):
         """
-        For shared storage, storing is stateless - no action needed.
+        For shared storage, storing is stateless but we emit events for stored blocks.
         """
-        pass
+        if success:
+            self._publish_blocks_stored(keys)
+
+    def shutdown(self) -> None:
+        if self._event_publisher is not None:
+            self._event_publisher.close()

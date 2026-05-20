@@ -109,13 +109,16 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
             if backend == "OBJ":
                 from llmd_nixl.manager import NixlStorageOffloadingManager
 
+                self.extra_config.setdefault("storage_medium", "OBJECT_STORE")
                 self._manager = NixlStorageOffloadingManager(
                     file_mapper=self.file_mapper,
                     extra_config=self.extra_config,
                 )
             else:
+                self.extra_config.setdefault("storage_medium", "SHARED_STORAGE")
                 self._manager = SharedStorageOffloadingManager(
                     file_mapper=self.file_mapper,
+                    extra_config=self.extra_config,
                 )
         return self._manager
 
