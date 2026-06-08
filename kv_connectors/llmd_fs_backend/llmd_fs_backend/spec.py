@@ -67,9 +67,9 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
             self.extra_config.get("block_size", DEFAULT_STORAGE_BLOCK_SIZE)
         )
 
-        assert len(self.gpu_block_size) == 1, (
-            f"Expected exactly one KV cache group, got {len(self.gpu_block_size)}"
-        )
+        # hash_block_size = GCD of all groups' block sizes (the granularity at
+        # which Request.block_hashes are computed); use it instead of
+        # cache_config.block_size which can be larger on hybrid models (e.g. DSv4).
         assert self.offloaded_block_size % self.hash_block_size == 0, (
             "offloaded_block_size must be a multiple of hash_block_size"
         )
