@@ -97,6 +97,17 @@ type TokenProcessor interface {
 		extraFeatures []*BlockExtraFeatures,
 	) ([]BlockHash, error)
 
+	// TokensToKVBlockKeysWithDigests is identical to TokensToKVBlockKeys but
+	// also returns the underlying full-width digests alongside the truncated
+	// BlockHash values. For SHA256-CBOR each digest is the 32-byte hash; for
+	// FNV-64a each digest is the 8-byte big-endian encoding of the uint64
+	// hash. Used by the prefetch plugin to build vLLM fs-connector filenames,
+	// which require the full hash bytes (vLLM ≥ v0.10.2 writes 64-hex names).
+	TokensToKVBlockKeysWithDigests(
+		parentKey BlockHash, tokens []uint32, modelName string,
+		extraFeatures []*BlockExtraFeatures,
+	) ([]BlockHash, [][]byte, error)
+
 	// BlockSize returns the number of tokens per block used by this processor.
 	BlockSize() int
 }
@@ -179,15 +190,50 @@ func (db *chunkedTokenDatabase) TokensToKVBlockKeys(
 	}
 }
 
+// TokensToKVBlockKeysWithDigests returns BlockHash keys plus the underlying
+// full-width hash digests. SHA256-CBOR returns the 32-byte digests as-is; FNV
+// returns the 8-byte big-endian encoding of each uint64 hash. The prefetch
+// plugin uses the digests to build vLLM fs-connector filenames.
+func (db *chunkedTokenDatabase) TokensToKVBlockKeysWithDigests(
+	parentKey BlockHash, tokens []uint32, modelName string,
+	extraFeatures []*BlockExtraFeatures,
+) ([]BlockHash, [][]byte, error) {
+	switch db.HashAlgorithm {
+	case HashAlgorithmSHA256CBOR:
+		digests, err := db.tokensToSHA256Digests(parentKey, tokens, extraFeatures)
+		if err != nil {
+			return nil, nil, err
+		}
+		keys := utils.SliceMap(digests, func(h []byte) BlockHash {
+			return BlockHash(blockHashToEngineKey(h))
+		})
+		return keys, digests, nil
+	default:
+		keys, err := db.tokensToKVBlockKeysFNV(parentKey, tokens, modelName, extraFeatures)
+		if err != nil {
+			return nil, nil, err
+		}
+		digests := make([][]byte, len(keys))
+		for i, k := range keys {
+			buf := make([]byte, 8)
+			binary.BigEndian.PutUint64(buf, uint64(k))
+			digests[i] = buf
+		}
+		return keys, digests, nil
+	}
+}
+
 // --- SHA256-CBOR path ---
 
-// tokensToKVBlockKeysSHA256 implements the SHA256-CBOR hashing path, matching
-// vLLM's engine-key computation with full support for extra features (LoRA,
-// multimodal hashes, cache salt, prompt embeds). modelName is not included
-// in the hash (vLLM sha256_cbor behaviour).
-func (db *chunkedTokenDatabase) tokensToKVBlockKeysSHA256(
+// tokensToSHA256Digests computes the chained 32-byte SHA256-CBOR digests for
+// the given tokens, matching vLLM's engine-key computation with full support
+// for extra features (LoRA, multimodal hashes, cache salt, prompt embeds).
+// modelName is not included in the hash (vLLM sha256_cbor behaviour). Returns
+// the raw [][]byte digests; truncation to a uint64 BlockHash is performed by
+// the caller.
+func (db *chunkedTokenDatabase) tokensToSHA256Digests(
 	parentKey BlockHash, tokens []uint32, extraFeatures []*BlockExtraFeatures,
-) ([]BlockHash, error) {
+) ([][]byte, error) {
 	if parentKey != EmptyBlockHash {
 		klog.FromContext(context.Background()).Error(
 			fmt.Errorf("non-empty parentKey unsupported for sha256_cbor"),
@@ -202,7 +248,6 @@ func (db *chunkedTokenDatabase) tokensToKVBlockKeysSHA256(
 		return nil, nil
 	}
 
-	// Validate or initialize extraFeatures to match chunk count
 	if extraFeatures == nil {
 		extraFeatures = make([]*BlockExtraFeatures, len(chunks))
 	} else if len(extraFeatures) != len(chunks) {
@@ -211,8 +256,16 @@ func (db *chunkedTokenDatabase) tokensToKVBlockKeysSHA256(
 	}
 
 	initDigest := getInitHashSHA256(db.HashSeed)
-	hashes := prefixHashesSHA256(initDigest, chunks, extraFeatures)
+	return prefixHashesSHA256(initDigest, chunks, extraFeatures), nil
+}
 
+func (db *chunkedTokenDatabase) tokensToKVBlockKeysSHA256(
+	parentKey BlockHash, tokens []uint32, extraFeatures []*BlockExtraFeatures,
+) ([]BlockHash, error) {
+	hashes, err := db.tokensToSHA256Digests(parentKey, tokens, extraFeatures)
+	if err != nil {
+		return nil, err
+	}
 	return utils.SliceMap(hashes, func(h []byte) BlockHash {
 		return BlockHash(blockHashToEngineKey(h))
 	}), nil
